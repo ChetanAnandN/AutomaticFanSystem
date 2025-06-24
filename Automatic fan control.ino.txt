@@ -3,540 +3,169 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 #include <Wire.h>
+#ifdef ARDUINO
 #include <BluetoothSerial.h>
+BluetoothSerial SerialBT;
+#endif
 #include <ArduinoJson.h>
 
-// Pin Definitions - Updated for your wiring
-#define DHT22_PIN 14     // DHT22 sensor pin
-#define DHT11_PIN 32     // DHT11 sensor pin
-#define FAN_PWM_PIN 25   // Fan PWM control pin (4-pin fan)
-#define FAN_TACH_PIN 35  // Fan TACH/RPM feedback pin (optional)
-#define CURRENT_SENSOR_PIN 34  // ACS712 current sensor pin
+// --- Pin Definitions ---
+#define DHT22_PIN 14
+#define DHT11_PIN 32
+#define FAN_PWM_PIN 25
+#define FAN_TACH_PIN 35
+#define CURRENT_SENSOR_PIN 34
 
-// I2C Pins for OLED displays
+// I2C Pins for OLED
 #define I2C_SDA 21
 #define I2C_SCL 22
 
-// OLED Display Settings
+// OLED Settings
 #define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32  // Changed for 1.3" x 0.7" display
+#define SCREEN_HEIGHT 32
 #define OLED_RESET -1
-#define SCREEN_ADDRESS1 0x3C  // First OLED address
-#define SCREEN_ADDRESS2 0x3D  // Second OLED address
+#define SCREEN_ADDRESS 0x3C // Use 0x3D if needed
 
 // Temperature Thresholds
-#define TEMP_LOW_THRESHOLD 25.0    // Below this - fan OFF
-#define TEMP_HIGH_THRESHOLD 30.0   // Above this - fan FULL speed
-#define TEMP_MEDIUM_THRESHOLD 27.5 // Between this and high - fan MEDIUM speed
+#define TEMP_LOW_THRESHOLD 25.0
+#define TEMP_HIGH_THRESHOLD 30.0
+#define TEMP_MEDIUM_THRESHOLD 27.5
 
-// Create sensor objects
+// Sensor Objects
 DHT dht22(DHT22_PIN, DHT22);
 DHT dht11(DHT11_PIN, DHT11);
-
-// Create OLED display objects
-Adafruit_SSD1306 display1(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-Adafruit_SSD1306 display2(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// Create Bluetooth object
-BluetoothSerial SerialBT;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Variables
-float temperature1 = 0, humidity1 = 0;  // DHT22 readings
-float temperature2 = 0, humidity2 = 0;  // DHT11 readings
-float currentConsumption = 0;           // Current in Amps
-int fanSpeed = 0;                       // Fan speed (0-255)
-int fanRPM = 0;                         // Actual fan RPM from TACH
-unsigned long lastUpdate = 0;
-unsigned long lastBluetoothUpdate = 0;
-const unsigned long UPDATE_INTERVAL = 1000; // Update every 1 second
-const unsigned long BLUETOOTH_INTERVAL = 2000; // Send Bluetooth data every 2 seconds
-
-// Current sensor calibration
-const float CURRENT_SENSOR_OFFSET = 2.5;  // ACS712 offset voltage
-const float CURRENT_SENSOR_SENSITIVITY = 0.185; // ACS712 sensitivity (V/A)
-
-// TACH pulse counting for RPM calculation
+float temperature1 = 0, humidity1 = 0;
+float temperature2 = 0, humidity2 = 0;
+float currentConsumption = 0;
+int fanSpeed = 0;
+int fanRPM = 0;
 volatile unsigned long tachPulseCount = 0;
 unsigned long lastTachTime = 0;
-const unsigned long TACH_TIMEOUT = 1000; // 1 second timeout for RPM calculation
+unsigned long lastUpdate = 0;
+unsigned long lastBTUpdate = 0;
 
-// Function declarations
+// Constants
+const float CURRENT_SENSOR_OFFSET = 2.5;
+const float CURRENT_SENSOR_SENSITIVITY = 0.185;
+
+// Function Declarations
 void setupSensors();
-void setupDisplays();
-void setupBluetooth();
+void updateDisplay();
 void readSensors();
 void controlFan();
 void calculateCurrent();
 void calculateRPM();
-void updateDisplay1();
-void updateDisplay2();
-void sendBluetoothData();
-void displayFanStatus();
 void tachInterrupt();
-void handleBluetoothCommands();
-void handleSerialCommands();
+void sendBluetoothData();
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  
-  Serial.println("=== Smart Fan System ===");
-  Serial.println("Initializing sensors and displays...");
-  
-  // Initialize I2C
   Wire.begin(I2C_SDA, I2C_SCL);
-  
-  // Initialize sensors
-  setupSensors();
-  
-  // Initialize displays
-  setupDisplays();
-  
-  // Initialize Bluetooth
-  setupBluetooth();
-  
-  // Initialize fan control pins
+  dht22.begin();
+  dht11.begin();
   pinMode(FAN_PWM_PIN, OUTPUT);
   pinMode(FAN_TACH_PIN, INPUT_PULLUP);
-  
-  // Set up TACH interrupt for RPM measurement
   attachInterrupt(digitalPinToInterrupt(FAN_TACH_PIN), tachInterrupt, FALLING);
-  
-  // Initialize TACH variables
-  tachPulseCount = 0;
-  lastTachTime = 0;
-  
-  // Set initial fan state
-  analogWrite(FAN_PWM_PIN, 0);
-  
-  Serial.println("System ready!");
-  Serial.println("Temperature thresholds:");
-  Serial.printf("  Low: %.1f°C (Fan OFF)\n", TEMP_LOW_THRESHOLD);
-  Serial.printf("  Medium: %.1f°C (Fan 50%%)\n", TEMP_MEDIUM_THRESHOLD);
-  Serial.printf("  High: %.1f°C (Fan 100%%)\n", TEMP_HIGH_THRESHOLD);
-  Serial.println("Bluetooth device name: SmartFan_ESP32");
-  Serial.println("=== ESP32 Fan Controller ===");
-  Serial.println("Manual Fan Control Commands:");
-  Serial.println("  0 - Fan OFF (0%)");
-  Serial.println("  1 - Fan 25%");
-  Serial.println("  2 - Fan 50%");
-  Serial.println("  3 - Fan 75%");
-  Serial.println("  4 - Fan 100%");
-  Serial.println("  s - Custom speed (0-255)");
-  Serial.println("  h - Show help");
-  Serial.println("=============================");
+  SerialBT.begin("SmartFan_ESP32");
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    while (1);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Smart Fan Ready");
+  display.display();
+  delay(1000);
 }
 
 void loop() {
   unsigned long currentTime = millis();
-  
-  if (currentTime - lastUpdate >= UPDATE_INTERVAL) {
-    // Read all sensors
+  if (currentTime - lastUpdate >= 1000) {
     readSensors();
-    
-    // Control fan based on temperature
     controlFan();
-    
-    // Calculate current consumption
     calculateCurrent();
-    
-    // Calculate actual RPM from TACH
     calculateRPM();
-    
-    // Update displays
-    updateDisplay1();
-    updateDisplay2();
-    
-    // Print status to serial
-    displayFanStatus();
-    
+    updateDisplay();
     lastUpdate = currentTime;
   }
-  
-  // Send Bluetooth data every 2 seconds
-  if (currentTime - lastBluetoothUpdate >= BLUETOOTH_INTERVAL) {
+
+  if (currentTime - lastBTUpdate >= 2000) {
     sendBluetoothData();
-    lastBluetoothUpdate = currentTime;
+    lastBTUpdate = currentTime;
   }
-  
-  // Handle Bluetooth commands
-  if (SerialBT.available()) {
-    handleBluetoothCommands();
-  }
-  
-  // Handle serial commands
-  handleSerialCommands();
-  
-  delay(100); // Small delay to prevent overwhelming
-}
-
-void setupSensors() {
-  dht22.begin();
-  dht11.begin();
-  Serial.println("DHT sensors initialized");
-}
-
-void setupDisplays() {
-  // Initialize first OLED
-  if (!display1.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS1)) {
-    Serial.println("SSD1306 Display 1 allocation failed");
-  } else {
-    display1.clearDisplay();
-    display1.setTextSize(1);
-    display1.setTextColor(SSD1306_WHITE);
-    display1.setCursor(0, 0);
-    display1.println("Smart Fan System");
-    display1.println("Display 1 Ready");
-    display1.display();
-    Serial.println("Display 1 initialized");
-  }
-  
-  // Initialize second OLED
-  if (!display2.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS2)) {
-    Serial.println("SSD1306 Display 2 allocation failed");
-  } else {
-    display2.clearDisplay();
-    display2.setTextSize(1);
-    display2.setTextColor(SSD1306_WHITE);
-    display2.setCursor(0, 0);
-    display2.println("Smart Fan System");
-    display2.println("Display 2 Ready");
-    display2.display();
-    Serial.println("Display 2 initialized");
-  }
-}
-
-void setupBluetooth() {
-  SerialBT.begin("SmartFan_ESP32");
-  Serial.println("Bluetooth initialized - Device name: SmartFan_ESP32");
 }
 
 void readSensors() {
-  // Read DHT22
   temperature1 = dht22.readTemperature();
   humidity1 = dht22.readHumidity();
-  
-  // Read DHT11
   temperature2 = dht11.readTemperature();
   humidity2 = dht11.readHumidity();
-  
-  // Check for valid readings
-  if (isnan(temperature1) || isnan(humidity1)) {
-    Serial.println("Failed to read DHT22");
-    temperature1 = 0;
-    humidity1 = 0;
-  }
-  
-  if (isnan(temperature2) || isnan(humidity2)) {
-    Serial.println("Failed to read DHT11");
-    temperature2 = 0;
-    humidity2 = 0;
-  }
+  if (isnan(temperature1)) temperature1 = 0;
+  if (isnan(humidity1)) humidity1 = 0;
+  if (isnan(temperature2)) temperature2 = 0;
+  if (isnan(humidity2)) humidity2 = 0;
 }
 
 void controlFan() {
-  // Use average temperature from both sensors
-  float avgTemperature = (temperature1 + temperature2) / 2.0;
-
-  if (avgTemperature < TEMP_LOW_THRESHOLD) {
-    // Temperature below threshold - turn fan OFF
-    fanSpeed = 0;
-    analogWrite(FAN_PWM_PIN, 0);
-  } else {
-    // Calculate temperature difference above threshold
-    float tempDiff = avgTemperature - TEMP_LOW_THRESHOLD;
-    
-    // 25% increments: 0-2°C = 25%, 2-4°C = 50%, 4-6°C = 75%, 6°C+ = 100%
-    int percent;
-    if (tempDiff < 2.0) {
-      percent = 25;
-    } else if (tempDiff < 4.0) {
-      percent = 50;
-    } else if (tempDiff < 6.0) {
-      percent = 75;
-    } else {
-      percent = 100;
-    }
-    
-    fanSpeed = map(percent, 0, 100, 0, 255);
-    analogWrite(FAN_PWM_PIN, fanSpeed);
-  }
+  float avgTemp = (temperature1 + temperature2) / 2.0;
+  if (avgTemp < TEMP_LOW_THRESHOLD) fanSpeed = 0;
+  else if (avgTemp >= TEMP_HIGH_THRESHOLD) fanSpeed = 255;
+  else if (avgTemp >= TEMP_MEDIUM_THRESHOLD) fanSpeed = 180;
+  else fanSpeed = 100;
+  analogWrite(FAN_PWM_PIN, fanSpeed);
 }
 
 void calculateCurrent() {
-  // Read analog value from current sensor
   int sensorValue = analogRead(CURRENT_SENSOR_PIN);
-  
-  // Convert to voltage (ESP32 ADC reference is 3.3V, 12-bit resolution)
   float voltage = (sensorValue * 3.3) / 4095.0;
-  
-  // Calculate current using ACS712 formula
   currentConsumption = (voltage - CURRENT_SENSOR_OFFSET) / CURRENT_SENSOR_SENSITIVITY;
-  
-  // Ensure current is positive and reasonable
   if (currentConsumption < 0) currentConsumption = 0;
-  if (currentConsumption > 10) currentConsumption = 10; // Max 10A for safety
 }
 
 void tachInterrupt() {
-  // Simple pulse counting with debouncing
-  static unsigned long lastInterruptTime = 0;
-  unsigned long interruptTime = millis();
-  
-  // Debounce: ignore interrupts that come too quickly (less than 5ms apart)
-  if (interruptTime - lastInterruptTime > 5) {
+  static unsigned long lastInterrupt = 0;
+  unsigned long now = millis();
+  if (now - lastInterrupt > 5) {
     tachPulseCount++;
-    lastInterruptTime = interruptTime;
+    lastInterrupt = now;
   }
 }
 
 void calculateRPM() {
-  unsigned long currentTime = millis();
-  
-  // Calculate RPM every 3 seconds for more stable readings
-  if (currentTime - lastTachTime >= 3000) {
-    // Most 4-pin fans have 2 pulses per revolution
-    // RPM = (pulses * 60 seconds) / (time in seconds * 2 pulses per revolution)
-    if (tachPulseCount > 0) {
-      // More accurate calculation for 4-pin fans
-      fanRPM = (tachPulseCount * 60) / (3 * 2); // 3 seconds * 2 pulses per revolution
-      
-      // Apply calibration factor (adjust this based on your fan)
-      // If RPM seems too high, increase this number
-      // If RPM seems too low, decrease this number
-      fanRPM = fanRPM * 1.0; // Calibration factor - adjust as needed
-    } else {
-      fanRPM = 0; // No pulses detected
-    }
-    
-    // Debug output for calibration
-    Serial.printf("TACH pulses: %lu, Raw RPM: %d, Calibrated RPM: %d\n", 
-                  tachPulseCount, (tachPulseCount * 60) / (3 * 2), fanRPM);
-    
-    // Reset pulse count
+  unsigned long now = millis();
+  if (now - lastTachTime >= 3000) {
+    fanRPM = (tachPulseCount * 60) / (3 * 2);
     tachPulseCount = 0;
-    lastTachTime = currentTime;
+    lastTachTime = now;
   }
+}
+
+void updateDisplay() {
+  float avgTemp = (temperature1 + temperature2) / 2.0;
+  float powerW = currentConsumption * 12.0;
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.printf("T:%.1fC H:%.0f%%\n", avgTemp, (humidity1 + humidity2) / 2);
+  display.printf("RPM:%d P:%.1fW\n", fanRPM, powerW);
+  display.printf("I:%.2fA F:%d%%\n", currentConsumption, (fanSpeed * 100) / 255);
+  display.display();
 }
 
 void sendBluetoothData() {
-  float avgTemp = (temperature1 + temperature2) / 2.0;
-  float powerW = currentConsumption * 12.0; // Assuming 12V fan
-  
-  // Create JSON data
-  StaticJsonDocument<512> doc;
-  
-  doc["device"] = "SmartFan_ESP32";
-  doc["timestamp"] = millis();
-  
-  // Sensor data
-  doc["dht22"]["temperature"] = temperature1;
-  doc["dht22"]["humidity"] = humidity1;
-  doc["dht11"]["temperature"] = temperature2;
-  doc["dht11"]["humidity"] = humidity2;
-  doc["average_temperature"] = avgTemp;
-  
-  // Fan data
-  doc["fan"]["speed_percent"] = (fanSpeed * 100) / 255;
-  doc["fan"]["speed_pwm"] = fanSpeed;
-  doc["fan"]["rpm"] = fanRPM;
-  doc["fan"]["status"] = (fanSpeed == 0) ? "OFF" : 
-                        (fanSpeed == 255) ? "FULL" : "MEDIUM";
-  
-  // Power data
-  doc["power"]["current_amps"] = currentConsumption;
-  doc["power"]["power_watts"] = powerW;
-  
-  // Temperature status
-  if (avgTemp < TEMP_LOW_THRESHOLD) {
-    doc["status"] = "COOL";
-  } else if (avgTemp >= TEMP_HIGH_THRESHOLD) {
-    doc["status"] = "HOT";
-  } else {
-    doc["status"] = "WARM";
-  }
-  
-  // Thresholds
-  doc["thresholds"]["low"] = TEMP_LOW_THRESHOLD;
-  doc["thresholds"]["medium"] = TEMP_MEDIUM_THRESHOLD;
-  doc["thresholds"]["high"] = TEMP_HIGH_THRESHOLD;
-  
-  // Convert to string and send
-  String jsonString;
-  serializeJson(doc, jsonString);
-  SerialBT.println(jsonString);
-  
-  // Also send a simple text format for easy reading
-  SerialBT.println("=== Smart Fan System Status ===");
-  SerialBT.printf("DHT22: %.1f°C, %.1f%%\n", temperature1, humidity1);
-  SerialBT.printf("DHT11: %.1f°C, %.1f%%\n", temperature2, humidity2);
-  SerialBT.printf("Average: %.1f°C\n", avgTemp);
-  SerialBT.printf("Fan: %d%% (%d RPM)\n", (fanSpeed * 100) / 255, fanRPM);
-  SerialBT.printf("Current: %.2fA, Power: %.1fW\n", currentConsumption, powerW);
-  SerialBT.println("================================");
-}
-
-void handleBluetoothCommands() {
-  String command = SerialBT.readString();
-  command.trim();
-  command.toLowerCase();
-  
-  Serial.printf("Bluetooth command: %s\n", command.c_str());
-  
-  if (command == "status") {
-    // Send immediate status
-    sendBluetoothData();
-  } else if (command == "help") {
-    SerialBT.println("Available commands:");
-    SerialBT.println("status - Get current system status");
-    SerialBT.println("help - Show this help");
-  } else {
-    SerialBT.printf("Unknown command: %s\n", command.c_str());
-    SerialBT.println("Type 'help' for available commands");
-  }
-}
-
-void handleSerialCommands() {
-  if (Serial.available()) {
-    char command = Serial.read();
-    
-    switch(command) {
-      case '0':
-        // Turn fan OFF
-        fanSpeed = 0;
-        analogWrite(FAN_PWM_PIN, 0);
-        Serial.println("Fan turned OFF (0%)");
-        break;
-        
-      case '1':
-        // Set fan to 25%
-        fanSpeed = map(25, 0, 100, 0, 255);
-        analogWrite(FAN_PWM_PIN, fanSpeed);
-        Serial.println("Fan set to 25%");
-        break;
-        
-      case '2':
-        // Set fan to 50%
-        fanSpeed = map(50, 0, 100, 0, 255);
-        analogWrite(FAN_PWM_PIN, fanSpeed);
-        Serial.println("Fan set to 50%");
-        break;
-        
-      case '3':
-        // Set fan to 75%
-        fanSpeed = map(75, 0, 100, 0, 255);
-        analogWrite(FAN_PWM_PIN, fanSpeed);
-        Serial.println("Fan set to 75%");
-        break;
-        
-      case '4':
-        // Set fan to 100%
-        fanSpeed = map(100, 0, 100, 0, 255);
-        analogWrite(FAN_PWM_PIN, fanSpeed);
-        Serial.println("Fan set to 100%");
-        break;
-        
-      case 'h':
-        // Show help
-        Serial.println("=== Fan Control Commands ===");
-        Serial.println("0 - Fan OFF (0%)");
-        Serial.println("1 - Fan 25%");
-        Serial.println("2 - Fan 50%");
-        Serial.println("3 - Fan 75%");
-        Serial.println("4 - Fan 100%");
-        Serial.println("s - Custom speed (0-255)");
-        Serial.println("h - Show this help");
-        Serial.println("============================");
-        break;
-        
-      case 's':
-        // Set custom fan speed (0-255)
-        Serial.println("Enter speed (0-255):");
-        while (!Serial.available()) {
-          delay(10);
-        }
-        {
-          int customSpeed = Serial.parseInt();
-          if (customSpeed >= 0 && customSpeed <= 255) {
-            fanSpeed = customSpeed;
-            analogWrite(FAN_PWM_PIN, fanSpeed);
-            Serial.printf("Fan speed set to %d\n", customSpeed);
-          } else {
-            Serial.println("Invalid speed. Use 0-255");
-          }
-        }
-        break;
-    }
-  }
-}
-
-void updateDisplay1() {
-  display1.clearDisplay();
-  display1.setTextSize(1);
-  display1.setTextColor(SSD1306_WHITE);
-
-  float avgTemp = (temperature1 + temperature2) / 2.0;
-  float powerW = currentConsumption * 12.0; // Assuming 12V fan
-
-  // Single line with all information
-  display1.setCursor(0, 12); // Center vertically
-  display1.print("P:");
-  display1.print(powerW, 1);
-  display1.print("W T1:");
-  display1.print(temperature1, 1);
-  display1.print(" T2:");
-  display1.print(temperature2, 1);
-  display1.print(" F:");
-  display1.print((fanSpeed * 100) / 255);
-  display1.print("%");
-
-  display1.display();
-}
-
-void updateDisplay2() {
-  display2.clearDisplay();
-  display2.setTextSize(1);
-  display2.setTextColor(SSD1306_WHITE);
-  
-  float avgTemp = (temperature1 + temperature2) / 2.0;
-
-  // Single line with status and additional info
-  display2.setCursor(0, 12); // Center vertically
-  if (avgTemp < TEMP_LOW_THRESHOLD) {
-    display2.print("COOL ");
-  } else if (avgTemp >= TEMP_LOW_THRESHOLD + 6) {
-    display2.print("HOT! ");
-  } else {
-    display2.print("WARM ");
-  }
-  display2.print("H:");
-  display2.print(humidity1, 0);
-  display2.print("% R:");
-  display2.print(fanRPM);
-  display2.print(" I:");
-  display2.print(currentConsumption, 2);
-  display2.print("A");
-
-  display2.display();
-}
-
-void displayFanStatus() {
-  float avgTemp = (temperature1 + temperature2) / 2.0;
-  
-  Serial.println("=== System Status ===");
-  Serial.printf("DHT22: %.1f°C, %.1f%%\n", temperature1, humidity1);
-  Serial.printf("DHT11: %.1f°C, %.1f%%\n", temperature2, humidity2);
-  Serial.printf("Average Temp: %.1f°C\n", avgTemp);
-  Serial.printf("Fan Speed: %d%% (%d RPM)\n", (fanSpeed * 100) / 255, fanRPM);
-  Serial.printf("Current: %.2fA\n", currentConsumption);
-  Serial.printf("Power: %.1fW\n", currentConsumption * 12.0);
-  
-  if (fanSpeed == 0) {
-    Serial.println("Fan Status: OFF (Temperature below threshold)");
-  } else if (fanSpeed == 255) {
-    Serial.println("Fan Status: FULL SPEED (Temperature above threshold)");
-  } else {
-    Serial.println("Fan Status: MEDIUM SPEED (Temperature in range)");
-  }
-  Serial.println("====================");
+  StaticJsonDocument<256> doc;
+  doc["T"] = (temperature1 + temperature2) / 2.0;
+  doc["H"] = (humidity1 + humidity2) / 2.0;
+  doc["RPM"] = fanRPM;
+  doc["I"] = currentConsumption;
+  doc["P"] = currentConsumption * 12.0;
+  doc["Fan"] = (fanSpeed * 100) / 255;
+  String output;
+  serializeJson(doc, output);
+  SerialBT.println(output);
 }
